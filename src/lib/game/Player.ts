@@ -17,6 +17,9 @@ export class Player {
   readonly drawSize = 96;
   speed = 140; // pixels per second
   direction: Direction = 'down';
+  /** Set by Game each frame after the position update — drives sprite-sheet
+   * selection (swim vs walk) in render. */
+  isSwimming = false;
   private animTime = 0;
   private moving = false;
 

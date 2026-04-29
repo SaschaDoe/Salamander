@@ -28,6 +28,8 @@ type Scene = {
   worldW: number;
   worldH: number;
   walkable: WalkChecker;
+  /** Mask of pond/swamp pixels — true here triggers the swim animation. */
+  water?: CollisionMask;
   /** Optional pre-rendered collision overlay (outdoor mask). */
   debugOverlay?: HTMLImageElement;
   /** Optional walkable rect to outline in debug mode (indoor floor). */
@@ -57,6 +59,7 @@ export class Game {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private spriteSheet!: HTMLImageElement;
+  private spriteSheetSwim!: HTMLImageElement;
   private player!: Player;
   private camera!: Camera;
   private input = new Input();
@@ -75,14 +78,17 @@ export class Game {
   }
 
   async start() {
-    const [bgOutdoor, bgIndoor, sprite, maskImg, mask] = await Promise.all([
+    const [bgOutdoor, bgIndoor, sprite, spriteSwim, maskImg, mask, water] = await Promise.all([
       loadImage('/background.png'),
       loadImage('/room.png'),
       loadImage('/salamander.png'),
+      loadImage('/salamander_swim.png'),
       loadImage('/collision-mask.png'),
-      CollisionMask.load('/collision-mask.png')
+      CollisionMask.load('/collision-mask.png'),
+      CollisionMask.load('/water-mask.png')
     ]);
     this.spriteSheet = sprite;
+    this.spriteSheetSwim = spriteSwim;
 
     const outdoor: Scene = {
       name: 'outdoor',
@@ -90,6 +96,7 @@ export class Game {
       worldW: bgOutdoor.naturalWidth,
       worldH: bgOutdoor.naturalHeight,
       walkable: mask,
+      water,
       debugOverlay: maskImg,
       triggers: [
         {
@@ -200,6 +207,10 @@ export class Game {
     this.player.update(dt, this.input.state, this.currentScene.walkable);
     this.camera.follow(this.player.x, this.player.y);
 
+    // Swim state: true while the player's center is on a pond/swamp pixel.
+    const w = this.currentScene.water;
+    this.player.isSwimming = w ? w.isWalkable(this.player.x, this.player.y) : false;
+
     this.activeTrigger = this.findTriggerAtPlayer();
     if (this.activeTrigger && this.input.consumeActionPress()) {
       // Capture before activate — switchScene clears activeTrigger.
@@ -265,14 +276,15 @@ export class Game {
       this.drawTriggerMarker(t);
     }
 
-    // Player
+    // Player — pick the swim sheet when standing in water.
+    const sheet = this.player.isSwimming ? this.spriteSheetSwim : this.spriteSheet;
     const sx = this.player.frame * SPRITE_CELL;
     const sy = this.player.row * SPRITE_CELL;
     const drawSize = this.player.drawSize;
     const dx = Math.round(this.player.x - cam.x - drawSize / 2);
     const dy = Math.round(this.player.y - cam.y - drawSize / 2);
     ctx.drawImage(
-      this.spriteSheet,
+      sheet,
       sx, sy, SPRITE_CELL, SPRITE_CELL,
       dx, dy, drawSize, drawSize
     );

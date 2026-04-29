@@ -1,14 +1,18 @@
 """
-Build script: normalize the salamander spritesheet into clean 256x256 frames
-and generate a collision mask from the background.
+Build script: normalize the salamander spritesheets into clean 256x256 frames
+and generate collision and water masks from the background.
 
 Run:  python scripts/build_assets.py
 Outputs:
-  static/salamander.png      (normalized 4x4 sheet, 1024x1024)
-  static/salamander.json     (frame metadata)
-  static/Background Level 1.png  (copy)
-  static/collision-mask.png  (B/W: white=walkable, black=blocked)
-  static/collision-debug.png (overlay for visual verification)
+  static/salamander.png        (normalized walking 4x4 sheet, 1024x1024)
+  static/salamander.json       (frame metadata)
+  static/salamander_swim.png   (normalized swim 4x4 sheet, 1024x1024)
+  static/salamander_swim.json  (frame metadata)
+  static/background.png        (copy of the level background)
+  static/collision-mask.png    (B/W: white=walkable, black=blocked)
+  static/water-mask.png        (B/W: white=pond/swamp area to swim on)
+  static/collision-debug.png   (overlay for visual verification)
+  static/room.png              (copy of the interior background)
 """
 
 from pathlib import Path
@@ -18,39 +22,52 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC_SPRITES = ROOT / "salamander spriteSheet.png"
+SRC_SWIM = ROOT / "salamander swimming sprite sheet.png"
 SRC_BG = ROOT / "Background Level 1.png"
 SRC_ROOM = ROOT / "room.png"
 OUT_DIR = ROOT / "static"
 OUT_DIR.mkdir(exist_ok=True)
 
 
-# ---------- Spritesheet ----------
+# ---------- Spritesheets ----------
 
 CELL = 256
 COLS, ROWS = 4, 4
-
-# Approximate row bands found by alpha analysis. We use these to pick the right
-# band of pixels for each direction so the sprite isn't clipped by neighboring rows.
-ROW_BANDS = [
-    (60, 210),    # row 0 (LEFT)
-    (290, 440),   # row 1 (RIGHT)
-    (515, 670),   # row 2 (UP)
-    (740, 920),   # row 3 (DOWN)
-]
 DIRECTIONS = ["down", "right", "left", "up"]
 
+# Approximate row bands found by alpha analysis. We use these to pick the right
+# band of pixels for each direction so the sprite isn't clipped by neighboring
+# rows during the per-cell tight-bbox extraction.
+ROW_BANDS_WALK = [
+    (60, 210),
+    (290, 440),
+    (515, 670),
+    (740, 920),
+]
+ROW_BANDS_SWIM = [
+    (60, 230),
+    (290, 430),
+    (510, 670),
+    (730, 920),
+]
 
-def normalize_spritesheet():
-    src = Image.open(SRC_SPRITES).convert("RGBA")
+
+def normalize_spritesheet(src_path: Path, out_png: Path, out_json: Path, row_bands):
+    """Crop each cell to its sprite's tight bbox, then re-place all frames so
+    they share a common ground line per row. Both walking and swimming sheets
+    use the same 4x4 layout — only their row bands differ."""
+    if not src_path.exists():
+        print(f"Skipping {src_path} (missing)")
+        return
+    src = Image.open(src_path).convert("RGBA")
     arr = np.array(src)
     out = Image.new("RGBA", (CELL * COLS, CELL * ROWS), (0, 0, 0, 0))
 
-    # First pass: collect each frame's tight bbox and overall max sizes per row
+    # First pass: collect each frame's tight bbox and overall max sizes per row.
     frames = []
-    max_w = 0
     max_h_per_row = [0] * ROWS
 
-    for r, (y1, y2) in enumerate(ROW_BANDS):
+    for r, (y1, y2) in enumerate(row_bands):
         for c in range(COLS):
             x1, x2 = c * CELL, (c + 1) * CELL
             sub = arr[y1:y2, x1:x2]
@@ -63,20 +80,21 @@ def normalize_spritesheet():
             by1, by2 = ys.min(), ys.max() + 1
             cropped = sub[by1:by2, bx1:bx2]
             frames.append(cropped)
-            max_w = max(max_w, cropped.shape[1])
             max_h_per_row[r] = max(max_h_per_row[r], cropped.shape[0])
 
-    # Second pass: place each frame inside its 256x256 cell, centered horizontally,
-    # bottom-aligned within the row's max-height band (so all frames share the same
-    # ground-line / anchor — that's what makes the walk cycle look smooth).
-    sprite_meta = {"cell": CELL, "cols": COLS, "rows": ROWS, "directions": DIRECTIONS, "frames": []}
-
+    # Second pass: place each frame inside its 256x256 cell, centered
+    # horizontally, bottom-aligned within the row's max-height band so all
+    # frames in the same direction share the same anchor line.
+    sprite_meta = {
+        "cell": CELL,
+        "cols": COLS,
+        "rows": ROWS,
+        "directions": DIRECTIONS,
+        "frames": [],
+    }
     for r in range(ROWS):
         row_h = max_h_per_row[r]
-        # vertical center of the row's content within the cell
         cell_top = r * CELL
-        # place the bottom of each frame at cell_top + (CELL/2 + row_h/2) so the
-        # body roughly sits centered in the cell
         bottom_y = cell_top + (CELL + row_h) // 2
 
         for c in range(COLS):
@@ -100,15 +118,13 @@ def normalize_spritesheet():
                 "sh": CELL,
             })
 
-    out_path = OUT_DIR / "salamander.png"
-    out.save(out_path)
-    meta_path = OUT_DIR / "salamander.json"
-    meta_path.write_text(json.dumps(sprite_meta, indent=2))
-    print(f"Wrote {out_path} ({out.size})")
-    print(f"Wrote {meta_path}")
+    out.save(out_png)
+    out_json.write_text(json.dumps(sprite_meta, indent=2))
+    print(f"Wrote {out_png} ({out.size})")
+    print(f"Wrote {out_json}")
 
 
-# ---------- Background + collision mask ----------
+# ---------- Background, collision mask, water mask ----------
 
 def build_collision_mask():
     bg = Image.open(SRC_BG).convert("RGBA")
@@ -143,21 +159,14 @@ def build_collision_mask():
 
     walkable = is_grass | is_pond | is_stone
 
-    from scipy.ndimage import binary_closing, binary_opening, binary_erosion, label
+    from scipy.ndimage import binary_closing, binary_opening, binary_erosion, binary_dilation, label
 
-    # Drop tiny isolated walkable specks inside obstacles (occasional bright
-    # pixels in tree canopy).
     walkable = binary_opening(walkable, iterations=2)
-    # Close small holes inside walkable areas (flowers, pebble shadows).
     walkable = binary_closing(walkable, iterations=4)
-    # Close gaps between trees / inside structures so the obstacle ring is
-    # solid (otherwise the player can squeeze between trees).
     blocked = ~walkable
     blocked = binary_closing(blocked, iterations=8)
     walkable = ~blocked
 
-    # Keep only the main connected walkable region. This drops walkable
-    # pockets that ended up outside the forest border (e.g. behind trees).
     labels, n_components = label(walkable)
     if n_components > 0:
         sizes = np.bincount(labels.ravel())
@@ -165,7 +174,6 @@ def build_collision_mask():
         main = int(np.argmax(sizes))
         walkable = (labels == main)
 
-    # Safety margin so the player's hitbox doesn't clip into walls.
     walkable = binary_erosion(walkable, iterations=3)
 
     final = np.where(walkable, 255, 0).astype(np.uint8)
@@ -174,17 +182,44 @@ def build_collision_mask():
     mask_img.save(mask_path)
     print(f"Wrote {mask_path}")
 
-    # Debug overlay: tint blocked areas red
+    # ----- Water mask -----
+    # Pond / swamp pixels that the player can step onto. Clean up small
+    # specks (single dark pixels in grass that triggered is_pond) and shrink
+    # by a couple pixels so the swim animation only kicks in when the player
+    # is clearly in the water, not just brushing the shore.
+    water = is_pond & ~is_grass
+    water = binary_opening(water, iterations=2)
+    water = binary_closing(water, iterations=4)
+    water = water & walkable
+    # Tiny fragments are usually shadows, not real water — drop components
+    # below a minimum size.
+    water_labels, water_n = label(water)
+    if water_n > 0:
+        wsizes = np.bincount(water_labels.ravel())
+        wsizes[0] = 0
+        keep = wsizes >= 800  # px area
+        water = keep[water_labels]
+    # Erode slightly so the swim trigger doesn't activate on every shore pixel.
+    water = binary_erosion(water, iterations=2)
+    water_final = np.where(water, 255, 0).astype(np.uint8)
+    water_img = Image.fromarray(water_final, "L")
+    water_path = OUT_DIR / "water-mask.png"
+    water_img.save(water_path)
+    print(f"Wrote {water_path}")
+
+    # ----- Debug overlay -----
     overlay = bg.copy()
     overlay_arr = np.array(overlay)
-    blocked = final == 0
-    overlay_arr[blocked, 0] = np.minimum(255, overlay_arr[blocked, 0].astype(int) + 80)
-    overlay_arr[blocked, 1] = (overlay_arr[blocked, 1] * 0.7).astype(np.uint8)
-    overlay_arr[blocked, 2] = (overlay_arr[blocked, 2] * 0.7).astype(np.uint8)
+    blocked_dbg = final == 0
+    overlay_arr[blocked_dbg, 0] = np.minimum(255, overlay_arr[blocked_dbg, 0].astype(int) + 80)
+    overlay_arr[blocked_dbg, 1] = (overlay_arr[blocked_dbg, 1] * 0.7).astype(np.uint8)
+    overlay_arr[blocked_dbg, 2] = (overlay_arr[blocked_dbg, 2] * 0.7).astype(np.uint8)
+    # Tint water blueish.
+    water_dbg = water_final > 0
+    overlay_arr[water_dbg, 2] = np.minimum(255, overlay_arr[water_dbg, 2].astype(int) + 90)
     Image.fromarray(overlay_arr).save(OUT_DIR / "collision-debug.png")
     print(f"Wrote {OUT_DIR / 'collision-debug.png'}")
 
-    # Copy background to static/
     bg.save(OUT_DIR / "background.png")
     print(f"Wrote {OUT_DIR / 'background.png'}")
 
@@ -199,6 +234,17 @@ def copy_room_interior():
 
 
 if __name__ == "__main__":
-    normalize_spritesheet()
+    normalize_spritesheet(
+        SRC_SPRITES,
+        OUT_DIR / "salamander.png",
+        OUT_DIR / "salamander.json",
+        ROW_BANDS_WALK,
+    )
+    normalize_spritesheet(
+        SRC_SWIM,
+        OUT_DIR / "salamander_swim.png",
+        OUT_DIR / "salamander_swim.json",
+        ROW_BANDS_SWIM,
+    )
     build_collision_mask()
     copy_room_interior()
