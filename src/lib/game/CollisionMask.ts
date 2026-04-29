@@ -39,6 +39,35 @@ export class CollisionMask {
   }
 
   /**
+   * Test whether *any* pixel of the given axis-aligned rectangle is set in
+   * the mask (i.e. "walkable" in the mask's internal terminology). Used by
+   * the runtime to ask the water mask "does the player's hitbox overlap the
+   * pond at all?" — even one overlapping pixel triggers swimming.
+   */
+  intersectsRect(cx: number, cy: number, halfW: number, halfH: number): boolean {
+    const step = 4;
+    const x0 = Math.floor(cx - halfW);
+    const x1 = Math.ceil(cx + halfW);
+    const y0 = Math.floor(cy - halfH);
+    const y1 = Math.ceil(cy + halfH);
+    if (
+      this.isWalkable(x0, y0) ||
+      this.isWalkable(x1 - 1, y0) ||
+      this.isWalkable(x0, y1 - 1) ||
+      this.isWalkable(x1 - 1, y1 - 1) ||
+      this.isWalkable((x0 + x1) >> 1, (y0 + y1) >> 1)
+    ) {
+      return true;
+    }
+    for (let y = y0; y < y1; y += step) {
+      for (let x = x0; x < x1; x += step) {
+        if (this.isWalkable(x, y)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Test an axis-aligned rectangle against the mask. Returns true if every
    * pixel in the rectangle is walkable. We sample on a coarse grid for speed,
    * which is fine because the player's hitbox is small and the mask was

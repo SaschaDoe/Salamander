@@ -32,26 +32,29 @@ type Scene = {
   water?: CollisionMask;
   /** Optional pre-rendered collision overlay (outdoor mask). */
   debugOverlay?: HTMLImageElement;
-  /** Optional walkable rect to outline in debug mode (indoor floor). */
-  debugRect?: { x0: number; y0: number; x1: number; y1: number };
+  /** Optional walkable rects to outline in debug mode (indoor floor). */
+  debugRects?: Rect[];
   triggers: Trigger[];
 };
 
-/** Walkable area defined as a single axis-aligned rectangle. */
-class RectWalk implements WalkChecker {
-  constructor(
-    public x0: number,
-    public y0: number,
-    public x1: number,
-    public y1: number
-  ) {}
+type Rect = { x0: number; y0: number; x1: number; y1: number };
+
+/** Walkable area defined as the union of axis-aligned rectangles. The
+ * player's hitbox must fit entirely inside *at least one* rectangle. */
+class MultiRectWalk implements WalkChecker {
+  constructor(public rects: Rect[]) {}
   isRectWalkable(cx: number, cy: number, halfW: number, halfH: number): boolean {
-    return (
-      cx - halfW >= this.x0 &&
-      cx + halfW <= this.x1 &&
-      cy - halfH >= this.y0 &&
-      cy + halfH <= this.y1
-    );
+    for (const r of this.rects) {
+      if (
+        cx - halfW >= r.x0 &&
+        cx + halfW <= r.x1 &&
+        cy - halfH >= r.y0 &&
+        cy + halfH <= r.y1
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -111,14 +114,24 @@ export class Game {
       ]
     };
 
+    const indoorRects: Rect[] = [
+      // Lower floor — the wooden plank floor across the bottom of the room.
+      { x0: 150, y0: 880, x1: 1280, y1: 1010 },
+      // Staircase — diagonal corridor from the floor up to the loft. Top
+      // and bottom intentionally extend ~30 px past the visible step
+      // boundary so the player's 24-px-tall hitbox has room to traverse
+      // into the floor and loft rectangles below/above.
+      { x0: 800, y0: 300, x1: 990, y1: 930 },
+      // Loft floor — the upper level where the bed and side table are.
+      { x0: 120, y0: 280, x1: 920, y1: 360 },
+    ];
     const indoor: Scene = {
       name: 'indoor',
       background: bgIndoor,
       worldW: bgIndoor.naturalWidth,
       worldH: bgIndoor.naturalHeight,
-      // Walkable strip along the wooden floor between the kitchen plant and the cauldron.
-      walkable: new RectWalk(200, 920, 1000, 1010),
-      debugRect: { x0: 200, y0: 920, x1: 1000, y1: 1010 },
+      walkable: new MultiRectWalk(indoorRects),
+      debugRects: indoorRects,
       triggers: [
         {
           // Exit zone centered on the rug — implied front door of the house.
@@ -207,9 +220,12 @@ export class Game {
     this.player.update(dt, this.input.state, this.currentScene.walkable);
     this.camera.follow(this.player.x, this.player.y);
 
-    // Swim state: true while the player's center is on a pond/swamp pixel.
+    // Swim state: true while any pixel of the player's hitbox overlaps a
+    // pond/swamp pixel — stepping a foot into water is enough.
     const w = this.currentScene.water;
-    this.player.isSwimming = w ? w.isWalkable(this.player.x, this.player.y) : false;
+    this.player.isSwimming = w
+      ? w.intersectsRect(this.player.x, this.player.y, this.player.halfW, this.player.halfH)
+      : false;
 
     this.activeTrigger = this.findTriggerAtPlayer();
     if (this.activeTrigger && this.input.consumeActionPress()) {
@@ -247,15 +263,17 @@ export class Game {
         );
         ctx.globalAlpha = 1;
       }
-      if (scene.debugRect) {
+      if (scene.debugRects) {
         ctx.strokeStyle = '#33ff77';
         ctx.lineWidth = 1;
-        ctx.strokeRect(
-          scene.debugRect.x0 - cam.x,
-          scene.debugRect.y0 - cam.y,
-          scene.debugRect.x1 - scene.debugRect.x0,
-          scene.debugRect.y1 - scene.debugRect.y0
-        );
+        for (const r of scene.debugRects) {
+          ctx.strokeRect(
+            r.x0 - cam.x,
+            r.y0 - cam.y,
+            r.x1 - r.x0,
+            r.y1 - r.y0
+          );
+        }
       }
       // Trigger boxes (yellow).
       ctx.strokeStyle = '#ffd24a';

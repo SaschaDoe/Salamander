@@ -147,8 +147,11 @@ def build_collision_mask():
     is_grass = (
         (g >= 130) & (r >= 90) & (b <= 70) & (g > r) & (g > b + 60)
     )
-    is_pond = (
-        (g >= 115) & (g > r) & (luminance >= 70) & (luminance <= 145)
+    # Strict pond/swamp colour: cool greens that aren't found in path stones.
+    # `g > r + 45` keeps every pond/bush sample (G-R 65-99) and excludes
+    # neutral path stones (G-R 11-36).
+    is_water_seed = (
+        (g >= 115) & (g > r + 45) & (luminance >= 70) & (luminance <= 145)
     )
     is_stone = (
         (luminance >= 95) & (luminance <= 165)
@@ -157,9 +160,50 @@ def build_collision_mask():
         & (g >= 100)
     )
 
-    walkable = is_grass | is_pond | is_stone
+    from scipy.ndimage import (
+        binary_closing,
+        binary_dilation,
+        binary_erosion,
+        binary_fill_holes,
+        binary_opening,
+        label,
+    )
 
-    from scipy.ndimage import binary_closing, binary_opening, binary_erosion, binary_dilation, label
+    # Build a solid swamp/pond blob from the seed pixels: close hairline gaps
+    # along the shoreline so the boundary is continuous, then fill every
+    # interior hole. Without this step the rocks, dark water and highlight
+    # pixels inside a pond fail every walkable detector and the player's
+    # hitbox can't fit anywhere inside the swamp.
+    swamp = binary_closing(is_water_seed, iterations=5)
+    swamp = binary_fill_holes(swamp)
+    swamp = binary_opening(swamp, iterations=2)
+    # Drop tiny stray fragments far from the real swamps (scattered green
+    # specks at the forest edge, etc.).
+    swamp_labels, swamp_n = label(swamp)
+    if swamp_n > 0:
+        ssizes = np.bincount(swamp_labels.ravel())
+        ssizes[0] = 0
+        keep = ssizes >= 1500
+        swamp = keep[swamp_labels]
+
+    # Build the "meadow envelope" — the area fully enclosed by the main
+    # grass region (so it covers grass + any interior obstacles + the real
+    # swamps, but stops at the forest). Then drop every swamp blob that
+    # lies outside the envelope. Without this filter, isolated pine trees
+    # in the forest border (whose dark canopies pass the cool-green
+    # detector) survive into `swamp` and the later "force walkable" step
+    # would carve tree-shaped holes through the forest.
+    grass_labels, grass_n = label(is_grass)
+    if grass_n > 0:
+        gsz = np.bincount(grass_labels.ravel())
+        gsz[0] = 0
+        main_grass = grass_labels == int(np.argmax(gsz))
+    else:
+        main_grass = np.zeros_like(is_grass)
+    meadow_envelope = binary_fill_holes(main_grass)
+    swamp = swamp & meadow_envelope
+
+    walkable = is_grass | swamp | is_stone
 
     walkable = binary_opening(walkable, iterations=2)
     walkable = binary_closing(walkable, iterations=4)
@@ -176,6 +220,35 @@ def build_collision_mask():
 
     walkable = binary_erosion(walkable, iterations=3)
 
+    # The swamp interior must be completely free of collision. Regardless of
+    # what the morphology pipeline did to its boundary, force every pixel
+    # inside the closed swamp blob to be walkable.
+    walkable = walkable | swamp
+
+    # Fill small enclosed "flower" pockets inside the meadow — clusters of
+    # dark grass / flower pixels that fail every walkable detector but are
+    # too small to be real obstacles. Anything that touches the image
+    # border (the forest) or is bigger than `speck_max` (houses, hut, dead
+    # tree, etc.) stays blocked. The real structures are all 2000+ px so
+    # 1500 is a comfortable cutoff.
+    speck_max = 1500
+    hole_labels, n_holes = label(~walkable)
+    if n_holes > 0:
+        hole_sizes = np.bincount(hole_labels.ravel())
+        border_ids: set[int] = set()
+        for edge in (
+            hole_labels[0],
+            hole_labels[-1],
+            hole_labels[:, 0],
+            hole_labels[:, -1],
+        ):
+            border_ids.update(int(v) for v in np.unique(edge))
+        fill = np.zeros_like(walkable)
+        for i in range(1, n_holes + 1):
+            if hole_sizes[i] < speck_max and i not in border_ids:
+                fill[hole_labels == i] = True
+        walkable = walkable | fill
+
     final = np.where(walkable, 255, 0).astype(np.uint8)
     mask_img = Image.fromarray(final, "L")
     mask_path = OUT_DIR / "collision-mask.png"
@@ -183,24 +256,11 @@ def build_collision_mask():
     print(f"Wrote {mask_path}")
 
     # ----- Water mask -----
-    # Pond / swamp pixels that the player can step onto. Clean up small
-    # specks (single dark pixels in grass that triggered is_pond) and shrink
-    # by a couple pixels so the swim animation only kicks in when the player
-    # is clearly in the water, not just brushing the shore.
-    water = is_pond & ~is_grass
-    water = binary_opening(water, iterations=2)
-    water = binary_closing(water, iterations=4)
-    water = water & walkable
-    # Tiny fragments are usually shadows, not real water — drop components
-    # below a minimum size.
-    water_labels, water_n = label(water)
-    if water_n > 0:
-        wsizes = np.bincount(water_labels.ravel())
-        wsizes[0] = 0
-        keep = wsizes >= 800  # px area
-        water = keep[water_labels]
-    # Erode slightly so the swim trigger doesn't activate on every shore pixel.
-    water = binary_erosion(water, iterations=2)
+    # Same swamp blob as the collision side, intersected with walkable. No
+    # erosion: the runtime checks the player's full hitbox against this mask,
+    # so the swim animation already requires the body to overlap water, not
+    # just the center pixel.
+    water = swamp & walkable
     water_final = np.where(water, 255, 0).astype(np.uint8)
     water_img = Image.fromarray(water_final, "L")
     water_path = OUT_DIR / "water-mask.png"
