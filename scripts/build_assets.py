@@ -114,36 +114,58 @@ def build_collision_mask():
     bg = Image.open(SRC_BG).convert("RGBA")
     arr = np.array(bg)
     r, g, b = arr[:, :, 0].astype(int), arr[:, :, 1].astype(int), arr[:, :, 2].astype(int)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
 
-    # Walkable = bright yellow-green grass. Empirical thresholds based on samples:
-    #   grass    R 120-150  G 150-170  B 40-55   (luminance ~130)
-    #   pond     R  10-140  G  60-165  B 30-75   (blue too high)
-    #   trees    R  35-90   G  70-130  B 20-50   (too dark)
+    # Three terrain types that the player can walk on, all sampled empirically
+    # from the background art:
+    #
+    #   grass         R 120-150  G 150-170  B 40-55   lum ~130
+    #   pond / swamp  R  30- 75  G 115-130  B 50-75   lum  85-105   (cooler greens)
+    #   path stones   R 100-135  G 105-135  B 70-100  lum 100-140   (neutral grey)
+    #
+    # The key discriminator between trees and ponds is the green channel: tree
+    # canopy and shadow tops out around G=113, ponds start around G=120. So
+    # `g >= 115` cleanly separates them. Houses (warm reds/purples) have
+    # `r >= g`, so requiring `g > r` excludes them from the green-dominant
+    # detectors.
     is_grass = (
-        (g >= 130)               # bright enough to be grass, not dark tree shadow
-        & (r >= 90)              # warm yellow-green, not pure dark green of trees
-        & (b <= 70)              # excludes the dark green water of ponds (higher blue)
-        & (g > r)                # green dominant
-        & (g > b + 60)           # green clearly above blue (extra pond exclusion)
+        (g >= 130) & (r >= 90) & (b <= 70) & (g > r) & (g > b + 60)
+    )
+    is_pond = (
+        (g >= 115) & (g > r) & (luminance >= 70) & (luminance <= 145)
+    )
+    is_stone = (
+        (luminance >= 95) & (luminance <= 165)
+        & (np.abs(r - g) <= 25)
+        & (b >= 60)
+        & (g >= 100)
     )
 
-    mask = np.where(is_grass, 255, 0).astype(np.uint8)
+    walkable = is_grass | is_pond | is_stone
 
-    # Morphological cleanup:
-    #  - close holes (flowers, pebbles, shadow dots inside grass)
-    #  - close gaps between trees so the forest border is a solid wall
-    #  - then erode by a few px for a small safety margin around obstacles
-    from scipy.ndimage import binary_closing, binary_opening, binary_erosion
-    walkable = mask > 0
-    # First, OPEN with small kernel: remove tiny isolated walkable specks inside obstacles
-    walkable = binary_opening(walkable, iterations=1)
-    # Then close holes inside walkable area
+    from scipy.ndimage import binary_closing, binary_opening, binary_erosion, label
+
+    # Drop tiny isolated walkable specks inside obstacles (occasional bright
+    # pixels in tree canopy).
+    walkable = binary_opening(walkable, iterations=2)
+    # Close small holes inside walkable areas (flowers, pebble shadows).
     walkable = binary_closing(walkable, iterations=4)
-    # Invert and close blocked area too (closes gaps between trees)
+    # Close gaps between trees / inside structures so the obstacle ring is
+    # solid (otherwise the player can squeeze between trees).
     blocked = ~walkable
-    blocked = binary_closing(blocked, iterations=6)
+    blocked = binary_closing(blocked, iterations=8)
     walkable = ~blocked
-    # Safety margin so the player doesn't clip into walls
+
+    # Keep only the main connected walkable region. This drops walkable
+    # pockets that ended up outside the forest border (e.g. behind trees).
+    labels, n_components = label(walkable)
+    if n_components > 0:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        main = int(np.argmax(sizes))
+        walkable = (labels == main)
+
+    # Safety margin so the player's hitbox doesn't clip into walls.
     walkable = binary_erosion(walkable, iterations=3)
 
     final = np.where(walkable, 255, 0).astype(np.uint8)

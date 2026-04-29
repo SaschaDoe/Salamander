@@ -210,11 +210,11 @@ export class Game {
       this.input.consumeActionPress();
     }
 
-    this.render(now);
+    this.render();
     this.rafId = requestAnimationFrame(this.frame);
   };
 
-  private render(time: number) {
+  private render() {
     const ctx = this.ctx;
     const cam = this.camera;
     const scene = this.currentScene;
@@ -259,10 +259,10 @@ export class Game {
       }
     }
 
-    // Interaction markers — pulse on the ground + bobbing chevron above.
-    // Drawn before the player so the salamander can walk over the glow.
+    // Interaction markers — a static, semi-transparent halo on the ground.
+    // Drawn before the player so the salamander can walk over it.
     for (const t of scene.triggers) {
-      this.drawTriggerMarker(t, time, t === this.activeTrigger);
+      this.drawTriggerMarker(t);
     }
 
     // Player
@@ -293,56 +293,27 @@ export class Game {
     }
   }
 
-  private drawTriggerMarker(t: Trigger, time: number, active: boolean) {
+  private drawTriggerMarker(t: Trigger) {
     const ctx = this.ctx;
     const cam = this.camera;
     const x = t.cx - cam.x;
     const y = t.cy - cam.y;
 
-    // Off-screen cull.
     const margin = 80;
     if (x < -margin || y < -margin || x > cam.viewW + margin || y > cam.viewH + margin) return;
 
-    const baseR = Math.max(t.halfW, t.halfH) + 6;
+    const baseR = Math.max(t.halfW, t.halfH) + 4;
 
-    // Soft constant glow on the ground.
     ctx.save();
     const grad = ctx.createRadialGradient(x, y, 0, x, y, baseR);
-    grad.addColorStop(0, 'rgba(255, 230, 140, 0.32)');
+    grad.addColorStop(0, 'rgba(255, 230, 140, 0.22)');
+    grad.addColorStop(0.6, 'rgba(255, 230, 140, 0.14)');
     grad.addColorStop(1, 'rgba(255, 230, 140, 0)');
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(x, y, baseR, 0, Math.PI * 2);
     ctx.fill();
-
-    // Outward-pulsing ring (1.4s period).
-    const phase = ((time / 1000) % 1.4) / 1.4;
-    const ringR = baseR * (0.75 + phase * 0.85);
-    const ringA = (1 - phase) * 0.6;
-    ctx.strokeStyle = `rgba(255, 220, 130, ${ringA.toFixed(3)})`;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(x, y, ringR, 0, Math.PI * 2);
-    ctx.stroke();
     ctx.restore();
-
-    // Bobbing chevron above the spot — hide while the prompt is on screen.
-    if (!active) {
-      const bob = Math.sin((time / 1000) * Math.PI * 2 / 0.9) * 3;
-      const cy = y - t.halfH - 16 + bob;
-      ctx.save();
-      ctx.fillStyle = 'rgba(255, 235, 150, 0.95)';
-      ctx.strokeStyle = 'rgba(50, 30, 10, 0.9)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x - 6, cy);
-      ctx.lineTo(x + 6, cy);
-      ctx.lineTo(x, cy + 7);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
   }
 }
 
